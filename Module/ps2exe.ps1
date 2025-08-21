@@ -53,6 +53,13 @@ encode output as UNICODE in console mode, useful to display special encoded char
 use GUI for prompting credentials in console mode instead of console input
 .PARAMETER iconFile
 icon file name for the compiled executable
+.PARAMETER embedFiles
+paths to files to embed given as hash table, will be extracted at runtime to the keys of the hashes, source
+file names must be unique, e.g. -embedFiles @{'Targetfilepath'='Sourcefilepath'}.
+Absolute and relative paths are allowed. For target paths a relative path beginning with '.\' is interpreted
+as relative to the executable, without the leading '.\' as relative to the current path at runtime.
+Directories are created automaticly on startup if necessary.
+In the target path environment variables in cmd.exe notation like %TEMP% or %APPDATA% are expanded at runtime.
 .PARAMETER title
 title information (displayed in details tab of Windows Explorer's properties dialog)
 .PARAMETER description
@@ -101,8 +108,8 @@ Compiles C:\Data\MyScript.ps1 to C:\Data\MyScriptGUI.exe as graphical executable
 Win-PS2EXE
 Start graphical front end to Invoke-ps2exe
 .NOTES
-Version: 0.5.0.32
-Date: 2025-07-20
+Version: 0.5.0.33
+Date: 2025-08-19
 Author: Ingo Karstein, Markus Scholtes
 .LINK
 https://github.com/MScholtes/PS2EXE
@@ -112,13 +119,13 @@ function Invoke-ps2exe
 	[CmdletBinding()]
 	Param([STRING]$inputFile = $NULL, [STRING]$outputFile = $NULL, [SWITCH]$prepareDebug, [SWITCH]$x86, [SWITCH]$x64, [int]$lcid,
 		[SWITCH]$STA, [SWITCH]$MTA, [SWITCH]$nested, [SWITCH]$noConsole, [SWITCH]$conHost, [SWITCH]$UNICODEEncoding, [SWITCH]$credentialGUI,
-		[STRING]$iconFile = $NULL, [STRING]$title, [STRING]$description, [STRING]$company, [STRING]$product, [STRING]$copyright, [STRING]$trademark, [STRING]$version,
-		[SWITCH]$configFile, [SWITCH]$noConfigFile, [SWITCH]$noOutput, [SWITCH]$noError, [SWITCH]$noVisualStyles, [SWITCH]$exitOnCancel,
+		[STRING]$iconFile = $NULL, $embedFiles = @{}, [STRING]$title, [STRING]$description, [STRING]$company, [STRING]$product, [STRING]$copyright, [STRING]$trademark,
+		[STRING]$version, [SWITCH]$configFile, [SWITCH]$noConfigFile, [SWITCH]$noOutput, [SWITCH]$noError, [SWITCH]$noVisualStyles, [SWITCH]$exitOnCancel,
 		[SWITCH]$DPIAware, [SWITCH]$winFormsDPIAware, [SWITCH]$requireAdmin, [SWITCH]$supportOS, [SWITCH]$virtualize, [SWITCH]$longPaths)
 
 <################################################################################>
 <##                                                                            ##>
-<##      PS2EXE-GUI v0.5.0.32                                                  ##>
+<##      PS2EXE-GUI v0.5.0.33                                                  ##>
 <##      Written by: Ingo Karstein (http://blog.karstein-consulting.com)       ##>
 <##      Reworked and GUI support by Markus Scholtes                           ##>
 <##                                                                            ##>
@@ -130,7 +137,7 @@ function Invoke-ps2exe
 
 	if (!$nested)
 	{
-		Write-Output "PS2EXE-GUI v0.5.0.32 by Ingo Karstein, reworked and GUI support by Markus Scholtes`n"
+		Write-Output "PS2EXE-GUI v0.5.0.33 by Ingo Karstein, reworked and GUI support by Markus Scholtes`n"
 	}
 	else
 	{
@@ -157,6 +164,8 @@ function Invoke-ps2exe
 		Write-Output " UNICODEEncoding = encode output as UNICODE in console mode"
 		Write-Output "   credentialGUI = use GUI for prompting credentials in console mode"
 		Write-Output "        iconFile = icon file name for the compiled executable"
+		Write-Output "      embedFiles = files to embed given as hash, will be extracted to key of hash, source file names must be unique"
+		Write-Output "                   (e.g. -embedFiles @{'Targetfilepath'='Sourcefilepath'} )"
 		Write-Output "           title = title information (displayed in details tab of Windows Explorer's properties dialog)"
 		Write-Output "     description = description information (not displayed, but embedded in executable)"
 		Write-Output "         company = company information (not displayed, but embedded in executable)"
@@ -199,13 +208,21 @@ function Invoke-ps2exe
 					{	$CallParam += " -$($Param.Key) $($Param.Value)" }
 				}
 				else
-				{ $CallParam += " -$($Param.Key) $($Param.Value)" }
+				{ if ($Param.Value -is [System.Collections.Hashtable])
+					{
+						$CallParam += " -$($Param.Key) @{"
+						$Param.Value.Keys | % { $CallParam += "'$_'='$($Param.Value[$_])';" }
+						$CallParam += "}"
+					} else {
+						$CallParam += " -$($Param.Key) $($Param.Value)"
+					}
+				}
 			}
 		}
 
 		$CallParam += " -nested"
 
-		powershell -Command "if ((Get-Command -Name 'Invoke-ps2exe' -ErrorAction 'SilentlyContinue').Length -eq 0) { Import-Module '$PSScriptRoot\ps2exe.psm1' }; &'$($MyInvocation.MyCommand.Name)' $CallParam"
+		powershell.exe -Command "if ((Get-Command -Name 'Invoke-ps2exe' -ErrorAction 'SilentlyContinue').Length -eq 0) { Import-Module '$PSScriptRoot\ps2exe.psm1' }; &'$($MyInvocation.MyCommand.Name)' $CallParam"
 		return
 	}
 
@@ -429,6 +446,21 @@ function Invoke-ps2exe
 
 	Write-Output "Reading input file $inputFile"
 	[VOID]$cp.EmbeddedResources.Add($inputFile)
+
+	$EMBEDSECTION = ""
+	if ($embedFiles -is [HASHTABLE])
+	{
+		if ($embedFiles.Count -gt 0)
+		{
+			Write-Output "Embedding $($embedFiles.Count) file(s)"
+			$EMBEDSECTION = "string tgtFile = string.Empty, tgtDir = string.Empty;`r`n"
+
+			$embedFiles.Keys | % {
+				[VOID]$cp.EmbeddedResources.Add($embedFiles["$_"])
+				$EMBEDSECTION += "tgtFile = Environment.ExpandEnvironmentVariables(@`"$_`");`r`nif (string.Compare(`".\\`", 0, tgtFile, 0, 2) == 0) { tgtFile = System.AppDomain.CurrentDomain.BaseDirectory + tgtFile.Substring(2); }`r`ntry { tgtDir = System.IO.Path.GetDirectoryName(tgtFile);`r`nif (tgtDir != string.Empty) { System.IO.Directory.CreateDirectory(tgtDir); }`r`nusing (System.IO.Stream tgtStream = new System.IO.FileStream(tgtFile, System.IO.FileMode.Create)) { executingAssembly.GetManifestResourceStream(`"$([System.IO.Path]::GetFileName($embedFiles["$_"]))`").CopyTo(tgtStream); }`r`n}`r`ncatch { throw new System.IO.IOException(`"Error creating '`" + tgtFile + `"'\r\n`"); }`r`n"
+			}
+		}
+	}
 
 	$culture = ""
 
@@ -2416,7 +2448,7 @@ $(if (!$noError) { if (!$noConsole) {@"
 		{
 			get
 			{
-				return new Version(0, 5, 0, 32);
+				return new Version(0, 5, 0, 33);
 			}
 		}
 
@@ -2607,6 +2639,9 @@ $(if (!$noConsole) {@"
 						}
 
 						Assembly executingAssembly = Assembly.GetExecutingAssembly();
+
+$EMBEDSECTION
+
 						using (System.IO.Stream scriptstream = executingAssembly.GetManifestResourceStream("$([System.IO.Path]::GetFileName($inputFile))"))
 						{
 							using (System.IO.StreamReader scriptreader = new System.IO.StreamReader(scriptstream, System.Text.Encoding.UTF8))
